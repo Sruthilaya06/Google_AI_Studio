@@ -129,8 +129,8 @@ export const QueryHistoryView: React.FC = () => {
                     <td className="py-3 px-4 text-emerald-700 font-bold whitespace-nowrap">
                       {item.matchedCount}
                     </td>
-                    <td className="py-3 px-4 font-sans text-slate-500 max-w-xs truncate" title={item.selectedFieldLabels.join(', ')}>
-                      {item.selectedFieldLabels.length} fields ({item.selectedFieldLabels.slice(0, 3).join(', ')}...)
+                    <td className="py-3 px-4 font-sans text-slate-500 max-w-xs truncate" title={(item.selectedFieldLabels || []).join(', ')}>
+                      {(item.selectedFieldLabels || []).length} fields ({(item.selectedFieldLabels || []).slice(0, 3).join(', ')}...)
                     </td>
                     <td className="py-3 px-4 text-right whitespace-nowrap">
                       <span

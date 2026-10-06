@@ -1,5 +1,5 @@
 // src/lib/types.ts
-// Standardized types for AIU Data Retrieval Application V2.1
+// Standardized types for AIU Data Retrieval Application V2.1 (Stabilization Pass)
 
 export type TableName =
   | 'user_details'
@@ -28,7 +28,7 @@ export interface OutputFieldDefinition {
   description?: string;
 }
 
-export type ResultStatus = 'MATCHED' | 'NO MATCH' | 'INVALID INPUT' | 'DUPLICATE' | 'ERROR';
+export type ResultStatus = 'MATCHED' | 'NO MATCH' | 'INVALID INPUT' | 'DUPLICATE INPUT' | 'ERROR';
 
 export interface SingleSearchResult {
   searchMode: 'single';
@@ -36,8 +36,9 @@ export interface SingleSearchResult {
   searchValue: string;
   status: ResultStatus;
   selectedFields: string[];
-  data: Record<string, any> | null;
-  rawDatabaseRecord?: Record<string, any> | null;
+  matchCount: number;
+  records: Record<string, any>[]; // All matching records containing requested fields
+  data: Record<string, any> | null; // Primary/first matching record (for convenience)
   errorMessage?: string;
   executionTimeMs?: number;
 }
@@ -47,8 +48,10 @@ export interface BulkRowResult {
   inputIdentifier: string;
   normalizedIdentifier: string;
   status: ResultStatus;
-  data: Record<string, any>; // Friendly field label -> value
-  originalRowData?: Record<string, any>; // Full original input row
+  matchCount: number;
+  data: Record<string, any>; // Primary record values (friendly field label -> value)
+  allRecords?: Record<string, any>[]; // Multiple matches if present
+  originalRowData?: Record<string, any>; // Full original input row for 100% traceability
   errorMessage?: string;
 }
 
@@ -56,6 +59,8 @@ export interface BulkSearchJob {
   id: string;
   fileName: string;
   fileType: string;
+  selectedSheet?: string;
+  delimiter?: string;
   totalRows: number;
   uniqueIdentifiers: number;
   searchType: SearchType;
@@ -83,6 +88,7 @@ export interface RetrievalHistoryRecord {
   matchedCount: number;
   noMatchCount: number;
   status: string;
+  selectedFieldCount: number;
   selectedFieldLabels: string[];
 }
 
@@ -120,6 +126,8 @@ export interface RelationshipMetadata {
 }
 
 export interface ValidationSummary {
+  isLiveMode: boolean;
+  dataSourceLabel: string;
   totalTables: number;
   totalRecords: number;
   validRecords: number;

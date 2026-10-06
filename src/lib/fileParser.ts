@@ -1,5 +1,5 @@
 // src/lib/fileParser.ts
-// Client-side file parser supporting CSV, Excel (.xlsx, .xls), and TXT formats for AIU Bulk Search
+// Multi-sheet Excel and multi-delimiter TXT file parser for AIU Bulk Search
 
 import * as XLSX from 'xlsx';
 
@@ -9,10 +9,105 @@ export interface ParsedFileInfo {
   rowCount: number;
   columns: string[];
   rows: Record<string, any>[];
+  sheets?: string[];
+  selectedSheet?: string;
+  detectedDelimiter?: string;
+  rawWorkbook?: any; // XLSX workbook reference for instant sheet switching
+  rawTextContent?: string; // Raw text content for delimiter switching
 }
 
 /**
- * Parses user-uploaded file using FileReader and XLSX
+ * Detect delimiter in text files: comma, tab, pipe, or semicolon
+ */
+export function detectTextDelimiter(textContent: string): string {
+  const lines = textContent.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  if (lines.length === 0) return ',';
+
+  const sample = lines.slice(0, 5).join('\n');
+  const counts = {
+    '\t': (sample.match(/\t/g) || []).length,
+    ',': (sample.match(/,/g) || []).length,
+    '|': (sample.match(/\|/g) || []).length,
+    ';': (sample.match(/;/g) || []).length,
+  };
+
+  let bestDelimiter = ',';
+  let maxCount = 0;
+
+  for (const [delim, count] of Object.entries(counts)) {
+    if (count > maxCount) {
+      maxCount = count;
+      bestDelimiter = delim;
+    }
+  }
+
+  return bestDelimiter;
+}
+
+export function getDelimiterName(delimiter: string): string {
+  switch (delimiter) {
+    case '\t':
+      return 'TAB';
+    case ',':
+      return 'COMMA';
+    case '|':
+      return 'PIPE';
+    case ';':
+      return 'SEMICOLON';
+    default:
+      return 'CUSTOM';
+  }
+}
+
+/**
+ * Parses a specific worksheet from an existing workbook
+ */
+export function parseSheetData(workbook: any, sheetName: string): { columns: string[]; rows: Record<string, any>[] } {
+  const worksheet = workbook.Sheets[sheetName];
+  if (!worksheet) {
+    throw new Error(`Sheet '${sheetName}' not found in workbook.`);
+  }
+
+  const rawJson: any[] = XLSX.utils.sheet_to_json(worksheet, { defval: '' });
+  if (rawJson.length === 0) {
+    return { columns: [], rows: [] };
+  }
+
+  const columns = Object.keys(rawJson[0]);
+  return { columns, rows: rawJson };
+}
+
+/**
+ * Parses raw text using specified delimiter
+ */
+export function parseTextWithDelimiter(
+  textContent: string,
+  delimiter: string
+): { columns: string[]; rows: Record<string, any>[] } {
+  // Use XLSX or line-by-line parsing
+  const lines = textContent.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  if (lines.length === 0) {
+    return { columns: [], rows: [] };
+  }
+
+  // Header row
+  const headers = lines[0].split(delimiter).map((h) => h.trim().replace(/^["']|["']$/g, ''));
+  const rows: Record<string, any>[] = [];
+
+  for (let i = 1; i < lines.length; i++) {
+    const parts = lines[i].split(delimiter).map((p) => p.trim().replace(/^["']|["']$/g, ''));
+    const rowObj: Record<string, any> = {};
+    headers.forEach((h, hIdx) => {
+      rowObj[h] = parts[hIdx] ?? '';
+    });
+    rows.push(rowObj);
+  }
+
+  return { columns: headers, rows };
+}
+
+/**
+ * Primary parser for uploaded files (CSV, XLSX, XLS, TXT)
  */
 export async function parseUploadedFile(file: File): Promise<ParsedFileInfo> {
   const extension = file.name.split('.').pop()?.toLowerCase() || '';
@@ -26,7 +121,6 @@ export async function parseUploadedFile(file: File): Promise<ParsedFileInfo> {
   const buffer = await file.arrayBuffer();
 
   if (extension === 'csv' || extension === 'txt') {
-    // Attempt parsing as text first, or fallback to XLSX
     const textDecoder = new TextDecoder('utf-8');
     const textContent = textDecoder.decode(buffer);
 
@@ -34,54 +128,48 @@ export async function parseUploadedFile(file: File): Promise<ParsedFileInfo> {
       throw new Error('The uploaded file is empty. Please provide a valid data file.');
     }
 
-    // Determine delimiter: comma, tab, or semicolon
-    const firstLine = textContent.split(/\r?\n/)[0] || '';
-    let delimiter = ',';
-    if (firstLine.includes('\t')) delimiter = '\t';
-    else if (firstLine.includes(';') && !firstLine.includes(',')) delimiter = ';';
+    const detectedDelimiter = detectTextDelimiter(textContent);
+    const { columns, rows } = parseTextWithDelimiter(textContent, detectedDelimiter);
 
-    const workbook = XLSX.read(textContent, { type: 'string', raw: true });
-    const sheetName = workbook.SheetNames[0];
-    const worksheet = workbook.Sheets[sheetName];
-    const rawJson: any[] = XLSX.utils.sheet_to_json(worksheet, { defval: '' });
-
-    if (rawJson.length === 0) {
+    if (rows.length === 0) {
       throw new Error('No data rows found in the uploaded file.');
     }
-
-    const columns = Object.keys(rawJson[0]);
 
     return {
       fileName: file.name,
       fileType: extension.toUpperCase(),
-      rowCount: rawJson.length,
+      rowCount: rows.length,
       columns,
-      rows: rawJson,
+      rows,
+      detectedDelimiter,
+      rawTextContent: textContent,
     };
   }
 
   // Excel binary (.xlsx, .xls)
   const workbook = XLSX.read(buffer, { type: 'array' });
-  if (workbook.SheetNames.length === 0) {
+  const sheets = workbook.SheetNames;
+
+  if (sheets.length === 0) {
     throw new Error('The Excel workbook contains no sheets.');
   }
 
-  const firstSheetName = workbook.SheetNames[0];
-  const worksheet = workbook.Sheets[firstSheetName];
-  const rawJson: any[] = XLSX.utils.sheet_to_json(worksheet, { defval: '' });
+  const selectedSheet = sheets[0];
+  const { columns, rows } = parseSheetData(workbook, selectedSheet);
 
-  if (rawJson.length === 0) {
-    throw new Error('The selected Excel sheet contains no data rows.');
+  if (rows.length === 0) {
+    throw new Error(`The sheet '${selectedSheet}' contains no data rows.`);
   }
-
-  const columns = Object.keys(rawJson[0]);
 
   return {
     fileName: file.name,
     fileType: extension.toUpperCase(),
-    rowCount: rawJson.length,
+    rowCount: rows.length,
     columns,
-    rows: rawJson,
+    rows,
+    sheets,
+    selectedSheet,
+    rawWorkbook: workbook,
   };
 }
 

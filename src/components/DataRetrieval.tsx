@@ -1,5 +1,5 @@
 // src/components/DataRetrieval.tsx
-// AIU Data Retrieval: Two primary modes - Single Search & Bulk Search with Output Field Control and Export
+// AIU Data Retrieval: Single Search (with multi-match support) & Bulk Search (with multi-sheet Excel & TXT delimiter support)
 
 import React, { useState, useRef } from 'react';
 import {
@@ -7,17 +7,13 @@ import {
   Upload,
   FileSpreadsheet,
   Download,
-  CheckCircle2,
   AlertCircle,
-  Clock,
-  Sparkles,
   FileText,
   Filter,
-  Layers,
   ArrowRight,
-  Database,
   RefreshCw,
-  HelpCircle,
+  Layers,
+  CheckCircle2,
 } from 'lucide-react';
 import {
   SearchType,
@@ -33,10 +29,15 @@ import {
 import {
   executeSingleSearch,
   executeBulkSearch,
-  getDataSourceMode,
-  setDataSourceMode,
 } from '../lib/api';
-import { parseUploadedFile, validateColumnCompatibility, ParsedFileInfo } from '../lib/fileParser';
+import {
+  parseUploadedFile,
+  validateColumnCompatibility,
+  parseSheetData,
+  parseTextWithDelimiter,
+  getDelimiterName,
+  ParsedFileInfo,
+} from '../lib/fileParser';
 import { exportResults, ExportFormat } from '../lib/exportUtils';
 import { OutputFieldSelector } from './OutputFieldSelector';
 
@@ -44,16 +45,13 @@ export const DataRetrieval: React.FC = () => {
   // Mode selection: 'single' | 'bulk'
   const [searchMode, setSearchMode] = useState<SearchMode>('single');
 
-  // Active data source mode ('demo' | 'live')
-  const [dataSourceMode, setDataSourceModeState] = useState<'demo' | 'live'>(getDataSourceMode());
-
   // Output fields state shared across both modes
   const [selectedFieldIds, setSelectedFieldIds] = useState<string[]>(
     OUTPUT_FIELDS_CATALOG.filter((f) => f.defaultSelected).map((f) => f.id)
   );
 
   // -------------------------------------------------------------
-  // SINGLE SEARCH STATE
+  // SINGLE SEARCH STATE (Priority 1 & 11: Multi-match support)
   // -------------------------------------------------------------
   const [singleSearchType, setSingleSearchType] = useState<SearchType>('mobile');
   const [singleSearchValue, setSingleSearchValue] = useState<string>('');
@@ -62,10 +60,12 @@ export const DataRetrieval: React.FC = () => {
   const [singleError, setSingleError] = useState<string | null>(null);
 
   // -------------------------------------------------------------
-  // BULK SEARCH STATE
+  // BULK SEARCH STATE (Priority 7: Multi-sheet Excel, Priority 8: Multi-delimiter TXT)
   // -------------------------------------------------------------
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [uploadedFile, setUploadedFile] = useState<ParsedFileInfo | null>(null);
+  const [selectedSheet, setSelectedSheet] = useState<string>('');
+  const [activeDelimiter, setActiveDelimiter] = useState<string>(',');
   const [bulkSearchType, setBulkSearchType] = useState<SearchType>('client_code');
   const [selectedInputCol, setSelectedInputCol] = useState<string>('');
   const [columnWarning, setColumnWarning] = useState<string | null>(null);
@@ -77,15 +77,7 @@ export const DataRetrieval: React.FC = () => {
   });
   const [bulkJob, setBulkJob] = useState<BulkSearchJob | null>(null);
   const [bulkError, setBulkError] = useState<string | null>(null);
-  const [bulkFilterTab, setBulkFilterTab] = useState<'ALL' | 'MATCHED' | 'NO MATCH' | 'INVALID'>('ALL');
-
-  // Handle switching data source mode
-  const handleToggleDataSource = (mode: 'demo' | 'live') => {
-    setDataSourceMode(mode);
-    setDataSourceModeState(mode);
-    setSingleResult(null);
-    setBulkJob(null);
-  };
+  const [bulkFilterTab, setBulkFilterTab] = useState<'ALL' | 'MATCHED' | 'NO MATCH' | 'DUPLICATES' | 'INVALID'>('ALL');
 
   // -------------------------------------------------------------
   // SINGLE SEARCH HANDLERS
@@ -110,10 +102,10 @@ export const DataRetrieval: React.FC = () => {
       );
       setSingleResult(res);
       if (res.status === 'INVALID INPUT') {
-        setSingleError(res.errorMessage || 'Invalid input value.');
+        setSingleError(res.errorMessage || 'Invalid input format.');
       }
     } catch (err: any) {
-      setSingleError(err.message || 'Single search retrieval failed.');
+      setSingleError(err.message || 'Unable to connect to the AIU data source. Please try again or contact the administrator.');
     } finally {
       setIsSingleLoading(false);
     }
@@ -125,27 +117,26 @@ export const DataRetrieval: React.FC = () => {
   };
 
   const handleExportSingle = (format: ExportFormat) => {
-    if (!singleResult || !singleResult.data) return;
+    if (!singleResult || singleResult.records.length === 0) return;
 
     const headers = selectedFieldIds.map((id) => {
       const f = OUTPUT_FIELDS_CATALOG.find((item) => item.id === id);
       return { key: f?.label || id, label: f?.label || id };
     });
 
-    // Add identifier & status
     const allHeaders = [
       { key: 'Search Identifier', label: 'Search Identifier' },
       { key: 'Status', label: 'Status' },
       ...headers,
     ];
 
-    const row = {
+    const rows = singleResult.records.map((rec) => ({
       'Search Identifier': singleResult.searchValue,
       Status: singleResult.status,
-      ...singleResult.data,
-    };
+      ...rec,
+    }));
 
-    exportResults(format, [row], allHeaders, `AIU_Retrieval_Result_${singleResult.searchValue}`);
+    exportResults(format, rows, allHeaders, `AIU_Retrieval_Result_${singleResult.searchValue}`);
   };
 
   // -------------------------------------------------------------
@@ -162,27 +153,78 @@ export const DataRetrieval: React.FC = () => {
       const parsed = await parseUploadedFile(file);
       setUploadedFile(parsed);
 
-      // Guess best matching column
-      const lowerCols = parsed.columns.map((c) => c.toLowerCase());
-      let autoCol = parsed.columns[0];
-
-      if (bulkSearchType === 'mobile') {
-        const found = parsed.columns.find((c) => c.toLowerCase().includes('mobile') || c.toLowerCase().includes('phone'));
-        if (found) autoCol = found;
-      } else if (bulkSearchType === 'client_code') {
-        const found = parsed.columns.find((c) => c.toLowerCase().includes('client') || c.toLowerCase().includes('code'));
-        if (found) autoCol = found;
-      } else if (bulkSearchType === 'form_number') {
-        const found = parsed.columns.find((c) => c.toLowerCase().includes('form'));
-        if (found) autoCol = found;
+      if (parsed.sheets && parsed.sheets.length > 0) {
+        setSelectedSheet(parsed.selectedSheet || parsed.sheets[0]);
+      }
+      if (parsed.detectedDelimiter) {
+        setActiveDelimiter(parsed.detectedDelimiter);
       }
 
-      setSelectedInputCol(autoCol);
-      checkColCompatibility(bulkSearchType, autoCol, parsed.rows);
+      // Auto-suggest best input column
+      suggestInputColumn(parsed.columns, bulkSearchType);
+      checkColCompatibility(bulkSearchType, parsed.columns[0], parsed.rows);
     } catch (err: any) {
       setBulkError(err.message || 'Failed to read uploaded file.');
       setUploadedFile(null);
     }
+  };
+
+  const handleSheetChange = (newSheet: string) => {
+    if (!uploadedFile || !uploadedFile.rawWorkbook) return;
+    try {
+      const { columns, rows } = parseSheetData(uploadedFile.rawWorkbook, newSheet);
+      setUploadedFile({
+        ...uploadedFile,
+        selectedSheet: newSheet,
+        columns,
+        rows,
+        rowCount: rows.length,
+      });
+      setSelectedSheet(newSheet);
+      suggestInputColumn(columns, bulkSearchType);
+      checkColCompatibility(bulkSearchType, columns[0] || '', rows);
+      setBulkJob(null);
+    } catch (err: any) {
+      setBulkError(err.message || 'Failed to load selected worksheet.');
+    }
+  };
+
+  const handleDelimiterChange = (newDelimiter: string) => {
+    if (!uploadedFile || !uploadedFile.rawTextContent) return;
+    try {
+      const { columns, rows } = parseTextWithDelimiter(uploadedFile.rawTextContent, newDelimiter);
+      setUploadedFile({
+        ...uploadedFile,
+        detectedDelimiter: newDelimiter,
+        columns,
+        rows,
+        rowCount: rows.length,
+      });
+      setActiveDelimiter(newDelimiter);
+      suggestInputColumn(columns, bulkSearchType);
+      checkColCompatibility(bulkSearchType, columns[0] || '', rows);
+      setBulkJob(null);
+    } catch (err: any) {
+      setBulkError(err.message || 'Failed to re-parse with selected delimiter.');
+    }
+  };
+
+  const suggestInputColumn = (columns: string[], searchType: SearchType) => {
+    if (columns.length === 0) return;
+    let autoCol = columns[0];
+
+    if (searchType === 'mobile') {
+      const found = columns.find((c) => c.toLowerCase().includes('mobile') || c.toLowerCase().includes('phone'));
+      if (found) autoCol = found;
+    } else if (searchType === 'client_code') {
+      const found = columns.find((c) => c.toLowerCase().includes('client') || c.toLowerCase().includes('code'));
+      if (found) autoCol = found;
+    } else if (searchType === 'form_number') {
+      const found = columns.find((c) => c.toLowerCase().includes('form'));
+      if (found) autoCol = found;
+    }
+
+    setSelectedInputCol(autoCol);
   };
 
   const checkColCompatibility = (type: SearchType, col: string, rows: Record<string, any>[]) => {
@@ -216,13 +258,15 @@ export const DataRetrieval: React.FC = () => {
         uploadedFile.rows,
         selectedFieldIds,
         uploadedFile.fileName,
+        selectedSheet,
+        activeDelimiter,
         (pct, done, total) => {
           setBulkProgress({ pct, done, total });
         }
       );
       setBulkJob(job);
     } catch (err: any) {
-      setBulkError(err.message || 'Bulk retrieval processing failed.');
+      setBulkError(err.message || 'Unable to connect to the AIU data source. Please try again or contact the administrator.');
     } finally {
       setIsBulkProcessing(false);
     }
@@ -233,7 +277,7 @@ export const DataRetrieval: React.FC = () => {
 
     let targetRows = bulkJob.results;
     if (scope === 'MATCHED') {
-      targetRows = bulkJob.results.filter((r) => r.status === 'MATCHED' || r.status === 'DUPLICATE');
+      targetRows = bulkJob.results.filter((r) => r.status === 'MATCHED' || r.status === 'DUPLICATE INPUT');
     } else if (scope === 'UNMATCHED') {
       targetRows = bulkJob.results.filter((r) => r.status === 'NO MATCH' || r.status === 'INVALID INPUT');
     }
@@ -264,7 +308,8 @@ export const DataRetrieval: React.FC = () => {
   // Filtered rows for Bulk Preview
   const displayedBulkRows = bulkJob
     ? bulkJob.results.filter((r) => {
-        if (bulkFilterTab === 'MATCHED') return r.status === 'MATCHED' || r.status === 'DUPLICATE';
+        if (bulkFilterTab === 'MATCHED') return r.status === 'MATCHED';
+        if (bulkFilterTab === 'DUPLICATES') return r.status === 'DUPLICATE INPUT';
         if (bulkFilterTab === 'NO MATCH') return r.status === 'NO MATCH';
         if (bulkFilterTab === 'INVALID') return r.status === 'INVALID INPUT';
         return true;
@@ -273,7 +318,7 @@ export const DataRetrieval: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      {/* Top Banner & Mode Toggle */}
+      {/* Top Banner & Mode Switcher (Clean auditor interface without raw dev switches - Priority 4) */}
       <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-5">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-slate-100 gap-3">
           <div>
@@ -286,29 +331,9 @@ export const DataRetrieval: React.FC = () => {
             </p>
           </div>
 
-          {/* Data Source Mode Indicator & Switcher */}
-          <div className="flex items-center space-x-2 bg-slate-50 p-1 rounded-lg border border-slate-200 text-xs">
-            <span className="text-slate-500 font-medium px-2">Data Source:</span>
-            <button
-              onClick={() => handleToggleDataSource('demo')}
-              className={`px-2.5 py-1 rounded font-semibold transition-colors ${
-                dataSourceMode === 'demo'
-                  ? 'bg-blue-600 text-white shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              Test Dataset (50/tbl)
-            </button>
-            <button
-              onClick={() => handleToggleDataSource('live')}
-              className={`px-2.5 py-1 rounded font-semibold transition-colors ${
-                dataSourceMode === 'live'
-                  ? 'bg-emerald-600 text-white shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              Live Supabase
-            </button>
+          <div className="flex items-center space-x-2 text-xs text-slate-500 bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200">
+            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+            <span>Relational Engine: Active</span>
           </div>
         </div>
 
@@ -340,7 +365,7 @@ export const DataRetrieval: React.FC = () => {
       </div>
 
       {/* ============================================================= */}
-      {/* 1. SINGLE SEARCH MODE */}
+      {/* 1. SINGLE SEARCH MODE (Priority 1 & 11) */}
       {/* ============================================================= */}
       {searchMode === 'single' && (
         <div className="space-y-6">
@@ -354,7 +379,7 @@ export const DataRetrieval: React.FC = () => {
                   onClick={() => handleApplySinglePreset('mobile', '9820123401')}
                   className="px-2 py-0.5 rounded bg-slate-100 hover:bg-blue-50 text-slate-700 hover:text-blue-700 font-mono text-[11px]"
                 >
-                  Mobile: 9820123401
+                  Mobile: 9820123401 (Multi-match test)
                 </button>
                 <button
                   type="button"
@@ -444,13 +469,13 @@ export const DataRetrieval: React.FC = () => {
             )}
           </div>
 
-          {/* Step 3: Reusable Output Field Selector */}
+          {/* Step 3: Reusable Output Field Selector (with Search filter & Safety Warning) */}
           <OutputFieldSelector
             selectedFieldIds={selectedFieldIds}
             onChange={setSelectedFieldIds}
           />
 
-          {/* Single Search Results Preview */}
+          {/* Single Search Results Preview (Priority 11: Multi-match rendering) */}
           {singleResult && (
             <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-5 space-y-4">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-slate-100 gap-3">
@@ -466,7 +491,11 @@ export const DataRetrieval: React.FC = () => {
                   </span>
                   <div>
                     <h3 className="text-sm font-bold text-slate-900">
-                      Result Preview for {singleResult.searchValue}
+                      {singleResult.matchCount === 1
+                        ? '1 matching record found'
+                        : singleResult.matchCount > 1
+                        ? `${singleResult.matchCount} matching records found`
+                        : `No matching records found for ${singleResult.searchValue}`}
                     </h3>
                     <p className="text-xs text-slate-400">
                       Retrieved in {singleResult.executionTimeMs} ms &bull; Showing {selectedFieldIds.length} requested fields
@@ -475,7 +504,7 @@ export const DataRetrieval: React.FC = () => {
                 </div>
 
                 {/* Export Buttons */}
-                {singleResult.status === 'MATCHED' && singleResult.data && (
+                {singleResult.status === 'MATCHED' && singleResult.records.length > 0 && (
                   <div className="flex items-center space-x-2">
                     <span className="text-xs text-slate-500 font-semibold mr-1">Export:</span>
                     <button
@@ -503,31 +532,42 @@ export const DataRetrieval: React.FC = () => {
                 )}
               </div>
 
-              {/* Data Table */}
-              {singleResult.status === 'MATCHED' && singleResult.data ? (
+              {/* Multi-Match Table View */}
+              {singleResult.status === 'MATCHED' && singleResult.records.length > 0 ? (
                 <div className="overflow-x-auto border border-slate-200 rounded-lg">
                   <table className="w-full text-left border-collapse text-xs">
                     <thead>
                       <tr className="bg-slate-100 text-slate-700 font-bold uppercase tracking-wider">
-                        {Object.keys(singleResult.data).map((label) => (
-                          <th key={label} className="py-2.5 px-3 whitespace-nowrap">
-                            {label}
-                          </th>
-                        ))}
+                        <th className="py-2.5 px-3">#</th>
+                        {selectedFieldIds.map((id) => {
+                          const f = OUTPUT_FIELDS_CATALOG.find((item) => item.id === id);
+                          return (
+                            <th key={id} className="py-2.5 px-3 whitespace-nowrap">
+                              {f?.label || id}
+                            </th>
+                          );
+                        })}
                       </tr>
                     </thead>
-                    <tbody>
-                      <tr className="bg-white divide-x divide-slate-100">
-                        {Object.values(singleResult.data).map((val, idx) => (
-                          <td key={idx} className="py-3 px-3 font-medium text-slate-800 whitespace-nowrap">
-                            {val !== null && val !== undefined && val !== '' ? (
-                              String(val)
-                            ) : (
-                              <span className="text-slate-300 italic">null</span>
-                            )}
-                          </td>
-                        ))}
-                      </tr>
+                    <tbody className="divide-y divide-slate-100">
+                      {singleResult.records.map((rec, rIdx) => (
+                        <tr key={rIdx} className="hover:bg-slate-50">
+                          <td className="py-3 px-3 font-semibold text-slate-400">{rIdx + 1}</td>
+                          {selectedFieldIds.map((id) => {
+                            const f = OUTPUT_FIELDS_CATALOG.find((item) => item.id === id);
+                            const val = rec[f?.label || ''];
+                            return (
+                              <td key={id} className="py-3 px-3 font-medium text-slate-800 whitespace-nowrap">
+                                {val !== null && val !== undefined && val !== '' ? (
+                                  String(val)
+                                ) : (
+                                  <span className="text-slate-300 italic">-</span>
+                                )}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
                     </tbody>
                   </table>
                 </div>
@@ -536,7 +576,7 @@ export const DataRetrieval: React.FC = () => {
                   <AlertCircle className="w-8 h-8 text-amber-500 mx-auto mb-2" />
                   <h4 className="text-sm font-bold text-slate-800">No Matching Record Found</h4>
                   <p className="text-xs text-slate-500 mt-1">
-                    The identifier "{singleResult.searchValue}" did not return a valid client record in the database.
+                    The identifier "{singleResult.searchValue}" did not return a valid client record in the AIU database.
                   </p>
                 </div>
               )}
@@ -546,11 +586,11 @@ export const DataRetrieval: React.FC = () => {
       )}
 
       {/* ============================================================= */}
-      {/* 2. BULK SEARCH MODE */}
+      {/* 2. BULK SEARCH MODE (Priority 7, 8, 9, 10, 14, 15) */}
       {/* ============================================================= */}
       {searchMode === 'bulk' && (
         <div className="space-y-6">
-          {/* File Upload & Column Mapping Card */}
+          {/* File Upload Card */}
           <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-5 space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-slate-100 gap-2">
               <div>
@@ -558,13 +598,12 @@ export const DataRetrieval: React.FC = () => {
                   Step 1 &amp; 2: Upload File &amp; Map Identifier Column
                 </h3>
                 <p className="text-xs text-slate-500">
-                  Supported formats: CSV, Excel (.xlsx, .xls), or TXT (tab-delimited).
+                  Supported formats: CSV, Excel (.xlsx, .xls) with multi-sheet support, or TXT (auto-detected delimiters).
                 </p>
               </div>
 
-              {/* Sample Template helper */}
               <div className="text-xs text-blue-600 font-medium">
-                <span>Accepts 1,000+ client rows with automatic deduplication &amp; batching</span>
+                <span>Deduplication &amp; input row traceability enabled</span>
               </div>
             </div>
 
@@ -589,7 +628,7 @@ export const DataRetrieval: React.FC = () => {
               </p>
             </div>
 
-            {/* File Info & Mapping Selectors (When file parsed) */}
+            {/* File Info, Multi-Sheet Selector & Delimiter Override */}
             {uploadedFile && (
               <div className="bg-blue-50/60 border border-blue-200 rounded-lg p-4 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
@@ -601,13 +640,55 @@ export const DataRetrieval: React.FC = () => {
                     </span>
                   </div>
                   <div className="text-slate-600 font-mono">
-                    <span className="font-bold text-blue-900">{uploadedFile.rowCount}</span> rows detected &bull;{' '}
+                    <span className="font-bold text-blue-900">{uploadedFile.rowCount}</span> data rows &bull;{' '}
                     <span className="font-bold text-blue-900">{uploadedFile.columns.length}</span> columns
                   </div>
                 </div>
 
+                {/* Priority 7: Multi-Sheet Excel Selection */}
+                {uploadedFile.sheets && uploadedFile.sheets.length > 1 && (
+                  <div className="p-2.5 bg-white border border-blue-200 rounded-md text-xs flex flex-wrap items-center gap-2">
+                    <span className="font-bold text-slate-700">Select Worksheet to Process:</span>
+                    <select
+                      value={selectedSheet}
+                      onChange={(e) => handleSheetChange(e.target.value)}
+                      className="bg-slate-50 border border-slate-300 rounded px-2.5 py-1 text-xs font-semibold text-blue-800"
+                    >
+                      {uploadedFile.sheets.map((sheet) => (
+                        <option key={sheet} value={sheet}>
+                          {sheet}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="text-[11px] text-slate-500">
+                      ({uploadedFile.sheets.length} sheets detected in workbook)
+                    </span>
+                  </div>
+                )}
+
+                {/* Priority 8: TXT Delimiter Detection & Override */}
+                {uploadedFile.fileType === 'TXT' && (
+                  <div className="p-2.5 bg-white border border-blue-200 rounded-md text-xs flex flex-wrap items-center gap-2">
+                    <span className="font-bold text-slate-700">
+                      Detected Delimiter: <span className="font-mono text-blue-700">{getDelimiterName(activeDelimiter)}</span>
+                    </span>
+                    <span className="text-slate-400">|</span>
+                    <span className="text-slate-600">Override delimiter:</span>
+                    <select
+                      value={activeDelimiter}
+                      onChange={(e) => handleDelimiterChange(e.target.value)}
+                      className="bg-slate-50 border border-slate-300 rounded px-2 py-0.5 text-xs font-medium"
+                    >
+                      <option value=",">Comma (,)</option>
+                      <option value="&#9;">Tab (\t)</option>
+                      <option value="|">Pipe (|)</option>
+                      <option value=";">Semicolon (;)</option>
+                    </select>
+                  </div>
+                )}
+
+                {/* Search Type & Column Mapping */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-blue-200/60">
-                  {/* Search By */}
                   <div>
                     <label className="block text-xs font-bold text-slate-800 uppercase tracking-wider mb-1">
                       Search By
@@ -617,9 +698,7 @@ export const DataRetrieval: React.FC = () => {
                       onChange={(e) => {
                         const newType = e.target.value as SearchType;
                         setBulkSearchType(newType);
-                        if (uploadedFile && selectedInputCol) {
-                          checkColCompatibility(newType, selectedInputCol, uploadedFile.rows);
-                        }
+                        suggestInputColumn(uploadedFile.columns, newType);
                       }}
                       className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-xs font-medium text-slate-800"
                     >
@@ -631,7 +710,6 @@ export const DataRetrieval: React.FC = () => {
                     </select>
                   </div>
 
-                  {/* Input Column Selector */}
                   <div>
                     <label className="block text-xs font-bold text-slate-800 uppercase tracking-wider mb-1">
                       Select Input Column
@@ -640,9 +718,7 @@ export const DataRetrieval: React.FC = () => {
                       value={selectedInputCol}
                       onChange={(e) => {
                         setSelectedInputCol(e.target.value);
-                        if (uploadedFile) {
-                          checkColCompatibility(bulkSearchType, e.target.value, uploadedFile.rows);
-                        }
+                        checkColCompatibility(bulkSearchType, e.target.value, uploadedFile.rows);
                       }}
                       className="w-full bg-white border border-slate-300 rounded-lg px-3 py-2 text-xs font-medium text-slate-800"
                     >
@@ -678,13 +754,13 @@ export const DataRetrieval: React.FC = () => {
             onChange={setSelectedFieldIds}
           />
 
-          {/* Process Button & Progress */}
+          {/* Process Button & Progress Indicator (Priority 10) */}
           <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-5">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div>
                 <h4 className="text-sm font-bold text-slate-900">Execute Bulk File Retrieval</h4>
                 <p className="text-xs text-slate-500">
-                  Processes identifiers in batches, removes duplicates, and generates preview and export files.
+                  Deduplicates identifiers, queries database in batches, maps results back to original rows, and preserves multi-match data.
                 </p>
               </div>
 
@@ -708,11 +784,13 @@ export const DataRetrieval: React.FC = () => {
               </button>
             </div>
 
-            {/* Progress Bar */}
+            {/* Accurate Progress Display (Priority 10) */}
             {isBulkProcessing && (
               <div className="mt-4 space-y-2">
                 <div className="flex items-center justify-between text-xs text-slate-600 font-semibold">
-                  <span>Processing unique targets: {bulkProgress.done} / {bulkProgress.total}</span>
+                  <span>
+                    Batch Progress: {bulkProgress.done} / {bulkProgress.total} unique identifiers
+                  </span>
                   <span>{bulkProgress.pct}%</span>
                 </div>
                 <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
@@ -725,21 +803,21 @@ export const DataRetrieval: React.FC = () => {
             )}
           </div>
 
-          {/* Bulk Retrieval Summary & Preview Results */}
+          {/* Bulk Retrieval Summary & Preview Results (Priority 9 & 15) */}
           {bulkJob && (
             <div className="bg-white rounded-xl border border-slate-200 shadow-xs p-5 space-y-5">
-              {/* Summary Cards */}
               <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-slate-100 gap-3">
                 <div>
                   <h3 className="text-sm font-bold uppercase tracking-wider text-slate-900">
                     Bulk Retrieval Summary
                   </h3>
                   <p className="text-xs text-slate-400">
-                    File: <span className="font-mono text-slate-700">{bulkJob.fileName}</span> &bull; Completed in {bulkJob.executionTimeMs} ms
+                    File: <span className="font-mono text-slate-700">{bulkJob.fileName}</span>{' '}
+                    {bulkJob.selectedSheet ? `(${bulkJob.selectedSheet})` : ''} &bull; Completed in {bulkJob.executionTimeMs} ms
                   </p>
                 </div>
 
-                {/* Export All / Matched / Unmatched */}
+                {/* Bulk Export Scopes (Priority 16 & 17) */}
                 <div className="flex items-center space-x-2 flex-wrap">
                   <span className="text-xs text-slate-500 font-bold mr-1">Export Results:</span>
                   <div className="inline-flex rounded-md shadow-xs" role="group">
@@ -771,7 +849,7 @@ export const DataRetrieval: React.FC = () => {
                 </div>
               </div>
 
-              {/* Metric Statistics */}
+              {/* Exact Status Statistics (Priority 9 & 15) */}
               <div className="grid grid-cols-2 sm:grid-cols-6 gap-3">
                 <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
                   <span className="text-[11px] font-bold text-slate-500 uppercase">Input Rows</span>
@@ -785,6 +863,10 @@ export const DataRetrieval: React.FC = () => {
                   <span className="text-[11px] font-bold text-emerald-700 uppercase">Matched</span>
                   <div className="text-lg font-bold text-emerald-800">{bulkJob.matchedCount}</div>
                 </div>
+                <div className="p-3 bg-purple-50 rounded-lg border border-purple-200">
+                  <span className="text-[11px] font-bold text-purple-700 uppercase">Duplicates</span>
+                  <div className="text-lg font-bold text-purple-800">{bulkJob.duplicateCount}</div>
+                </div>
                 <div className="p-3 bg-amber-50 rounded-lg border border-amber-200">
                   <span className="text-[11px] font-bold text-amber-700 uppercase">No Match</span>
                   <div className="text-lg font-bold text-amber-800">{bulkJob.noMatchCount}</div>
@@ -793,17 +875,13 @@ export const DataRetrieval: React.FC = () => {
                   <span className="text-[11px] font-bold text-rose-700 uppercase">Invalid</span>
                   <div className="text-lg font-bold text-rose-800">{bulkJob.invalidCount}</div>
                 </div>
-                <div className="p-3 bg-purple-50 rounded-lg border border-purple-200">
-                  <span className="text-[11px] font-bold text-purple-700 uppercase">Duplicates</span>
-                  <div className="text-lg font-bold text-purple-800">{bulkJob.duplicateCount}</div>
-                </div>
               </div>
 
               {/* Table Preview Filter Tabs */}
               <div className="flex items-center justify-between border-b border-slate-200 pb-2">
                 <div className="flex items-center space-x-2 text-xs">
                   <span className="font-bold text-slate-700">Filter Preview:</span>
-                  {(['ALL', 'MATCHED', 'NO MATCH', 'INVALID'] as const).map((tab) => (
+                  {(['ALL', 'MATCHED', 'DUPLICATES', 'NO MATCH', 'INVALID'] as const).map((tab) => (
                     <button
                       key={tab}
                       onClick={() => setBulkFilterTab(tab)}
@@ -830,6 +908,7 @@ export const DataRetrieval: React.FC = () => {
                       <th className="py-2.5 px-3">Row #</th>
                       <th className="py-2.5 px-3">Input Identifier</th>
                       <th className="py-2.5 px-3">Status</th>
+                      <th className="py-2.5 px-3">Matches</th>
                       {selectedFieldIds.map((id) => {
                         const f = OUTPUT_FIELDS_CATALOG.find((item) => item.id === id);
                         return (
@@ -850,7 +929,7 @@ export const DataRetrieval: React.FC = () => {
                             className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
                               row.status === 'MATCHED'
                                 ? 'bg-emerald-100 text-emerald-800'
-                                : row.status === 'DUPLICATE'
+                                : row.status === 'DUPLICATE INPUT'
                                 ? 'bg-purple-100 text-purple-800'
                                 : row.status === 'INVALID INPUT'
                                 ? 'bg-rose-100 text-rose-800'
@@ -859,6 +938,9 @@ export const DataRetrieval: React.FC = () => {
                           >
                             {row.status}
                           </span>
+                        </td>
+                        <td className="py-2.5 px-3 text-slate-600 font-mono">
+                          {row.matchCount > 0 ? `${row.matchCount}` : '-'}
                         </td>
                         {selectedFieldIds.map((id) => {
                           const f = OUTPUT_FIELDS_CATALOG.find((item) => item.id === id);

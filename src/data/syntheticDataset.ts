@@ -246,6 +246,147 @@ export function generateSyntheticDataset(): SyntheticDatasetStore {
     client_details.push(cdRow);
   }
 
+  // Multi-match test case: CL00101 has a secondary form (1000000051) with same mobile (9820123401)
+  const multiFormNum = 1000000051;
+  const multiClientCode = 'CL00101';
+  const multiMobile = '9820123401';
+  const multiPan = 'ABCDE1201F';
+
+  const uaiSecondary: any = {
+    form_number: multiFormNum,
+    client_code: multiClientCode,
+    user_type_residential_nri: 'RESIDENT',
+    user_bank_account_number: '501004928199',
+    user_bank_customer_id: 'CUST_88099',
+    user_bank_brnch_code: 'ICIC0000104',
+    user_bank_account_type_self_joint: 'JOINT',
+    user_bank_account_open_date: '2023-05-10',
+    user_demat_account_open_date: '2023-06-01',
+    user_info_entered_by: 'EMP_4091',
+    user_info_modified_by: 'EMP_4091',
+    user_info_modified_date: '2026-07-20T10:15:30Z',
+    user_bank_account_flag: 'VALID',
+    user_bank_type: 'CURRENT',
+  };
+  uaiSecondary.data = { ...uaiSecondary };
+  user_account_information.push(uaiSecondary);
+
+  const uadSecondary: any = {
+    form_number: multiFormNum,
+    address_type_correspondance_permanent: 'CORRESPONDENCE',
+    address_1: 'Plot 42, Cyber Gateway',
+    address_2: 'Tech Park Zone',
+    user_city: 'Pune',
+    user_state: 'Maharashtra',
+    user_country: 'India',
+    user_pin: '411057',
+    user_telephone_number: '020-25890101',
+    user_office_number: '020-66778899',
+    user_mobile_number: multiMobile,
+    user_mail_address_flag: 'Y',
+    user_details_entered_by: 'EMP_4091',
+    user_details_entry_date: '2023-05-10T09:30:00Z',
+    user_details_modified_by: 'EMP_8842',
+    user_details_modified_date: '2026-06-18T14:20:00Z',
+    user_address_same_as_correspondance: 'Y',
+    user_ip: '192.168.10.99',
+    user_mobile_relation: 'SELF',
+    user_rm_preferred_location_pin: '411057',
+  };
+  uadSecondary.data = { ...uadSecondary };
+  user_address_details.push(uadSecondary);
+
+  const updSecondary: any = {
+    form_number: multiFormNum,
+    user_type_applicant_permanent: 'PRIMARY',
+    user_first_name: 'Rahul',
+    user_middle_name: 'Kumar',
+    user_last_name: 'Sharma',
+    user_dob: '1985-04-12',
+    user_sex: 'M',
+    user_minor_flag: 'N',
+    user_email: 'rahul.sharma1@audit-example.com',
+    user_country_birth: 'India',
+    user_nationality: 'Indian',
+    user_entered_employee_number: 'EMP_4091',
+    user_details_entered_date: '2023-05-10T09:30:00Z',
+    user_details_modified_employee_number: 'EMP_8842',
+    userd_details_modified_date: '2026-06-18T14:20:00Z',
+    user_designation: 'Salaried Professional',
+    user_relation: 'SELF',
+    user_user_id: `USR_${multiClientCode}`,
+    user_income_category: '10_TO_25_LAKHS',
+    user_marital_status: 'MARRIED',
+    user_political_connect: 'N',
+    user_inperson_verification_date: '2023-05-11',
+    user_customer_type: 'INDIVIDUAL',
+    user_update_ip: '192.168.10.99',
+    user_update_channel: 'WEB',
+    user_us_person: 'N',
+    user_tax_filing_country: 'India',
+    user_place_of_birth: 'Mumbai',
+    user_email_relation: 'SELF',
+    user_aadhar_last_4_digit: '4001',
+    user_name_as_per_aadhar: 'Rahul Kumar Sharma',
+    user_aadhar_status: 'VERIFIED',
+    user_aadhar_consent_flag: 'Y',
+  };
+  updSecondary.data = { ...updSecondary };
+  user_personal_details.push(updSecondary);
+
+  const cdSecondary: any = {
+    form_number: multiFormNum,
+    client_code: multiClientCode,
+    customer_type_individual_huf: 'INDIVIDUAL',
+    client_inward_date: '2023-05-10',
+    client_scheme_type: 'PREMIUM_GOLD',
+    client_inward_status: 'ACCEPTED',
+    client_inward_accept_date: '2023-05-11',
+    client_agreement_date: '2023-05-10',
+    client_agent_code: 'AGT_9921',
+    client_sub_agent_code: 'SUB_102',
+    client_product_type: 'DERIVATIVES_FNO',
+    client_icici_emp_number: 'EMP_4091',
+    client_receipt_date: '2023-05-10',
+    client_form_version: 'V2.4',
+    client_user_id: `USR_${multiClientCode}`,
+    client_web_user_id: `WEB_${multiClientCode}`,
+    client_marital_status: 'MARRIED',
+    client_education_code: 'GRADUATE',
+    client_income_category_code: 'INC_CAT_3',
+    client_holding_range_code: 'HLD_10L_25L',
+    client_customer_nri_flag: 'N',
+    client_form_60_flag: 'N',
+    client_tax_assesse_flag: 'Y',
+    client_verification_date: '2023-05-12',
+    client_verify_status: 'VERIFIED',
+    client_ack_flag: 'Y',
+    client_ack_date: '2023-05-12',
+    client_send_mail_flag: 'Y',
+    client_eba_upload_flag: 'Y',
+    client_eba_upload_date: '2023-05-13',
+    client_last_flag: 'Y',
+    client_rejection_mail_remarks: '',
+    client_details_entered_by: 'EMP_4091',
+    client_details_entry_date: '2023-05-10T09:30:00Z',
+    client_details_modified_by: 'EMP_8842',
+    client_details_modified_date: '2026-06-18T14:20:00Z',
+    client_pan_number: multiPan,
+    client_category_employee_code: 'CAT_NORMAL',
+    client_rm_code: 'RM_7719',
+    client_nri_category_type: 'NONE',
+    client_nri_base_scheme: 'SCH_STD',
+    client_nri_current_scheme: 'SCH_STD',
+    client_non_isec_agent_code: '',
+    client_customer_type_change_date: '2023-05-10',
+    client_bank_type: 'PRIVATE',
+    client_settlement_type: 'MONTHLY',
+    client_demat_mandate_category: 'ONLINE',
+    client_brokerage_model_flag: 'PREPAID_PLATINUM',
+  };
+  cdSecondary.data = { ...cdSecondary };
+  client_details.push(cdSecondary);
+
   return {
     user_details,
     user_account_information,

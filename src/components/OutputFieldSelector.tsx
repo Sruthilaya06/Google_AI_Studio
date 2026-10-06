@@ -1,8 +1,8 @@
 // src/components/OutputFieldSelector.tsx
-// Reusable Output Field Selector Component for Single & Bulk Search
+// Reusable Output Field Selector Component with Search/Filter and Safety Warnings
 
-import React from 'react';
-import { CheckSquare, Square, CheckCircle2, AlertCircle } from 'lucide-react';
+import React, { useState } from 'react';
+import { Search, AlertCircle, ShieldAlert, CheckSquare, Square } from 'lucide-react';
 import { OUTPUT_FIELDS_CATALOG } from '../lib/metadata';
 import { OutputFieldCategory } from '../lib/types';
 
@@ -15,6 +15,8 @@ export const OutputFieldSelector: React.FC<OutputFieldSelectorProps> = ({
   selectedFieldIds,
   onChange,
 }) => {
+  const [searchQuery, setSearchQuery] = useState<string>('');
+
   const categories: OutputFieldCategory[] = [
     'Client Information',
     'Personal Information',
@@ -44,19 +46,26 @@ export const OutputFieldSelector: React.FC<OutputFieldSelectorProps> = ({
     const allSelected = catFieldIds.every((id) => selectedFieldIds.includes(id));
 
     if (allSelected) {
-      // Unselect this category
       onChange(selectedFieldIds.filter((id) => !catFieldIds.includes(id)));
     } else {
-      // Select all in this category
       const merged = Array.from(new Set([...selectedFieldIds, ...catFieldIds]));
       onChange(merged);
     }
   };
 
+  // Filter catalog by search query
+  const q = searchQuery.toLowerCase().trim();
+  const filteredCatalog = OUTPUT_FIELDS_CATALOG.filter(
+    (f) =>
+      f.label.toLowerCase().includes(q) ||
+      f.category.toLowerCase().includes(q) ||
+      (f.description && f.description.toLowerCase().includes(q))
+  );
+
   return (
     <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-xs space-y-4">
-      {/* Header bar with counter and action buttons */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-slate-100 gap-2">
+      {/* Header bar with search input, counter and action buttons */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-slate-100 gap-3">
         <div>
           <div className="flex items-center space-x-2">
             <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wider">
@@ -78,6 +87,18 @@ export const OutputFieldSelector: React.FC<OutputFieldSelectorProps> = ({
         </div>
 
         <div className="flex items-center space-x-2">
+          {/* Output field search filter */}
+          <div className="relative">
+            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search output fields..."
+              className="pl-8 pr-2.5 py-1 text-xs bg-slate-50 border border-slate-200 rounded-md focus:outline-none focus:ring-1 focus:ring-blue-500 w-44"
+            />
+          </div>
+
           <button
             type="button"
             onClick={handleSelectAll}
@@ -95,7 +116,7 @@ export const OutputFieldSelector: React.FC<OutputFieldSelectorProps> = ({
         </div>
       </div>
 
-      {/* Warning if 0 fields selected */}
+      {/* Mandatory selection error */}
       {selectedFieldIds.length === 0 && (
         <div className="flex items-center space-x-2 p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-xs">
           <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
@@ -105,12 +126,27 @@ export const OutputFieldSelector: React.FC<OutputFieldSelectorProps> = ({
         </div>
       )}
 
+      {/* Safety warning if a very large number of fields is selected (Priority 13) */}
+      {selectedFieldIds.length >= 15 && (
+        <div className="flex items-center space-x-2 p-2.5 bg-blue-50 border border-blue-200 rounded-lg text-blue-900 text-xs">
+          <ShieldAlert className="w-4 h-4 text-blue-600 shrink-0" />
+          <span>
+            Notice: Large field selections may produce larger files and may include sensitive client information.
+          </span>
+        </div>
+      )}
+
       {/* Categories Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         {categories.map((category) => {
-          const fields = OUTPUT_FIELDS_CATALOG.filter((f) => f.category === category);
-          const selectedInCat = fields.filter((f) => selectedFieldIds.includes(f.id)).length;
-          const isAllCatSelected = selectedInCat === fields.length;
+          const fields = filteredCatalog.filter((f) => f.category === category);
+          if (fields.length === 0 && searchQuery) return null;
+
+          const totalInCat = OUTPUT_FIELDS_CATALOG.filter((f) => f.category === category).length;
+          const selectedInCat = OUTPUT_FIELDS_CATALOG.filter(
+            (f) => f.category === category && selectedFieldIds.includes(f.id)
+          ).length;
+          const isAllCatSelected = selectedInCat === totalInCat;
 
           return (
             <div
@@ -162,7 +198,7 @@ export const OutputFieldSelector: React.FC<OutputFieldSelectorProps> = ({
               </div>
 
               <div className="mt-2 pt-2 border-t border-slate-200 text-[10px] text-slate-400 text-right">
-                {selectedInCat} / {fields.length} selected
+                {selectedInCat} / {totalInCat} selected
               </div>
             </div>
           );
