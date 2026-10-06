@@ -1,5 +1,5 @@
 // src/lib/types.ts
-// Standardized types for AIU Retrieval Application V2
+// Standardized types for AIU Data Retrieval Application V2.1
 
 export type TableName =
   | 'user_details'
@@ -8,9 +8,83 @@ export type TableName =
   | 'user_personal_details'
   | 'client_details';
 
-export type SearchType = 'mobile' | 'pan' | 'client_code' | 'form_number' | 'name';
+export type SearchType = 'mobile' | 'client_code' | 'form_number';
 
-export type RetrievalStatus = 'MATCHED' | 'RELATED' | 'NO MATCH' | 'INVALID' | 'ORPHAN' | 'ERROR';
+export type SearchMode = 'single' | 'bulk';
+
+export type OutputFieldCategory =
+  | 'Client Information'
+  | 'Personal Information'
+  | 'Contact Information'
+  | 'Account Information';
+
+export interface OutputFieldDefinition {
+  id: string;
+  label: string; // Business-friendly name (e.g. "Mobile Number", "PAN", "First Name")
+  table: TableName;
+  column: string;
+  category: OutputFieldCategory;
+  defaultSelected?: boolean;
+  description?: string;
+}
+
+export type ResultStatus = 'MATCHED' | 'NO MATCH' | 'INVALID INPUT' | 'DUPLICATE' | 'ERROR';
+
+export interface SingleSearchResult {
+  searchMode: 'single';
+  searchType: SearchType;
+  searchValue: string;
+  status: ResultStatus;
+  selectedFields: string[];
+  data: Record<string, any> | null;
+  rawDatabaseRecord?: Record<string, any> | null;
+  errorMessage?: string;
+  executionTimeMs?: number;
+}
+
+export interface BulkRowResult {
+  rowNumber: number;
+  inputIdentifier: string;
+  normalizedIdentifier: string;
+  status: ResultStatus;
+  data: Record<string, any>; // Friendly field label -> value
+  originalRowData?: Record<string, any>; // Full original input row
+  errorMessage?: string;
+}
+
+export interface BulkSearchJob {
+  id: string;
+  fileName: string;
+  fileType: string;
+  totalRows: number;
+  uniqueIdentifiers: number;
+  searchType: SearchType;
+  inputColumn: string;
+  selectedFields: string[];
+  matchedCount: number;
+  noMatchCount: number;
+  invalidCount: number;
+  duplicateCount: number;
+  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'ERROR';
+  progress: number;
+  results: BulkRowResult[];
+  originalColumns: string[];
+  executionTimeMs?: number;
+  errorMessage?: string;
+}
+
+export interface RetrievalHistoryRecord {
+  id: string;
+  timestamp: string;
+  mode: SearchMode;
+  searchType: SearchType;
+  inputSummary: string; // "9820123401" or "audit_clients.xlsx (120 rows)"
+  inputCount: number;
+  matchedCount: number;
+  noMatchCount: number;
+  status: string;
+  selectedFieldLabels: string[];
+}
 
 export interface ColumnDefinition {
   name: string;
@@ -43,72 +117,6 @@ export interface RelationshipMetadata {
   childKey: string;
   description: string;
   cardinality: '1:1' | '1:N';
-}
-
-export interface SearchMetadata {
-  type: SearchType;
-  label: string;
-  placeholder: string;
-  description: string;
-  sourceTable: TableName;
-  sourceColumn: string;
-  matchMethod: 'exact' | 'partial';
-  exampleValue: string;
-}
-
-export interface OutputFieldOption {
-  id: string;
-  table: TableName;
-  column: string;
-  label: string;
-  dataType: string;
-  defaultSelected: boolean;
-}
-
-export interface RecordWithAuditMeta {
-  [key: string]: any;
-  _sourceTable: TableName;
-  _matchReason: string;
-  _status: RetrievalStatus;
-  _relationshipPath?: string;
-}
-
-export interface SearchResponse {
-  searchCriteria: string;
-  searchType: SearchType;
-  executionStatus: 'SUCCESS' | 'ERROR';
-  validationStatus: 'PASS' | 'FAIL' | 'N/A';
-  tablesReturned: number;
-  relationshipPaths: string;
-  recordCounts: {
-    user_details: number;
-    user_account_information: number;
-    user_address_details: number;
-    user_personal_details: number;
-    client_details: number;
-    total: number;
-  };
-  data: {
-    user_details: any[];
-    user_account_information: any[];
-    user_address_details: any[];
-    user_personal_details: any[];
-    client_details: any[];
-  };
-  auditRecords?: RecordWithAuditMeta[];
-  matchedPrimaryRecord?: RecordWithAuditMeta | null;
-  errorMessage?: string;
-}
-
-export interface QueryHistoryItem {
-  id: string;
-  timestamp: string;
-  searchType: SearchType;
-  searchValue: string;
-  resultCount: number;
-  tablesReturned: number;
-  status: RetrievalStatus;
-  validationStatus: 'PASS' | 'FAIL' | 'N/A';
 }
 
 export interface ValidationSummary {

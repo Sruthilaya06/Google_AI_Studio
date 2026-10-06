@@ -1,5 +1,5 @@
 // supabase/functions/search-data/index.ts
-// AIU V2 Multi-Identifier Relationship Retrieval Edge Function
+// AIU V2.1 Relational Retrieval Edge Function supporting Single & Bulk Search with Output Field Filtering
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -9,12 +9,15 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-interface SearchPayload {
-  searchType: "mobile" | "pan" | "client_code" | "form_number" | "name";
-  searchValue: string;
+interface SearchRequest {
+  searchMode?: "single" | "bulk";
+  searchType: "mobile" | "client_code" | "form_number";
+  searchValue?: string;
+  values?: string[];
+  selectedFields?: string[];
 }
 
-serve(async (req) => {
+serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response("ok", { headers: corsHeaders });
   }
@@ -25,205 +28,175 @@ serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""
     );
 
-    const body: SearchPayload = await req.json();
-    const { searchType, searchValue } = body;
+    const body: SearchRequest = await req.json();
+    const { searchMode = "single", searchType, searchValue, values = [], selectedFields = [] } = body;
 
-    if (!searchValue || !searchValue.trim()) {
+    const targets: string[] = searchMode === "bulk"
+      ? Array.from(new Set(values.map((v) => String(v || "").trim()).filter(Boolean)))
+      : [String(searchValue || "").trim()].filter(Boolean);
+
+    if (targets.length === 0) {
       return new Response(
         JSON.stringify({
-          error: "Search value is required",
-          searchCriteria: searchValue,
-          searchType,
-          executionStatus: "ERROR",
+          error: "At least one search identifier is required",
+          status: "ERROR",
         }),
         { headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 400 }
       );
     }
 
-    const cleanVal = searchValue.trim();
-    let matchedClientCodes = new Set<string>();
-    let matchedFormNumbers = new Set<number>();
-    let relationshipPath = "";
-    let matchedRecords: any[] = [];
+    // Retrieve records in batches
+    const matchedRecordsMap = new Map<string, any>();
+    const clientCodes = new Set<string>();
+    const formNumbers = new Set<number>();
 
     if (searchType === "mobile") {
-      relationshipPath = "user_address_details (user_mobile_number) -> user_account_information (form_number) -> user_details (client_code) -> client_details & user_personal_details";
       const { data: addresses } = await supabaseClient
         .from("user_address_details")
         .select("*")
-        .eq("user_mobile_number", cleanVal);
+        .in("user_mobile_number", targets);
 
-      if (addresses && addresses.length > 0) {
-        addresses.forEach((a: any) => {
-          matchedFormNumbers.add(Number(a.form_number));
-          matchedRecords.push({ ...a, _sourceTable: "user_address_details", _matchReason: "MATCHED: user_mobile_number" });
+      (addresses || []).forEach((a: any) => {
+        formNumbers.add(Number(a.form_number));
+        matchedRecordsMap.set(String(a.user_mobile_number), {
+          source: a,
+          form_number: Number(a.form_number),
         });
-      }
-    } else if (searchType === "pan") {
-      relationshipPath = "client_details (client_pan_number) -> client_code & form_number -> user_details, user_account_information, user_personal_details, user_address_details";
-      const { data: clients } = await supabaseClient
-        .from("client_details")
-        .select("*")
-        .ilike("client_pan_number", cleanVal);
-
-      if (clients && clients.length > 0) {
-        clients.forEach((c: any) => {
-          if (c.client_code) matchedClientCodes.add(String(c.client_code));
-          if (c.form_number) matchedFormNumbers.add(Number(c.form_number));
-          matchedRecords.push({ ...c, _sourceTable: "client_details", _matchReason: "MATCHED: client_pan_number" });
-        });
-      }
+      });
     } else if (searchType === "client_code") {
-      relationshipPath = "user_details (client_code) -> user_account_information (R1) -> client_details (R2) -> user_address_details (R3) -> user_personal_details (R4)";
-      matchedClientCodes.add(cleanVal);
-      const { data: uDetails } = await supabaseClient
-        .from("user_details")
-        .select("*")
-        .ilike("client_code", cleanVal);
-
-      if (uDetails && uDetails.length > 0) {
-        uDetails.forEach((u: any) => {
-          matchedRecords.push({ ...u, _sourceTable: "user_details", _matchReason: "MATCHED: client_code" });
-        });
-      }
+      targets.forEach((c) => clientCodes.add(c.toUpperCase()));
     } else if (searchType === "form_number") {
-      relationshipPath = "user_account_information (form_number) -> user_details (client_code) -> user_address_details (R3), user_personal_details (R4), client_details (R5)";
-      const formNum = Number(cleanVal);
-      if (!isNaN(formNum)) {
-        matchedFormNumbers.add(formNum);
-      }
-    } else if (searchType === "name") {
-      relationshipPath = "user_personal_details (name partial match) -> user_account_information (form_number) -> user_details (client_code) -> user_address_details & client_details";
-      const { data: personals } = await supabaseClient
-        .from("user_personal_details")
-        .select("*")
-        .or(`user_first_name.ilike.%${cleanVal}%,user_last_name.ilike.%${cleanVal}%,user_middle_name.ilike.%${cleanVal}%`);
-
-      if (personals && personals.length > 0) {
-        personals.forEach((p: any) => {
-          matchedFormNumbers.add(Number(p.form_number));
-          matchedRecords.push({ ...p, _sourceTable: "user_personal_details", _matchReason: "MATCHED: name query" });
-        });
-      }
+      targets.forEach((f) => {
+        const num = Number(f);
+        if (!isNaN(num)) formNumbers.add(num);
+      });
     }
 
-    // Traverse relationships to retrieve all related records
-    // 1. If form numbers found, fetch user_account_information to get client_code
-    if (matchedFormNumbers.size > 0) {
-      const formArr = Array.from(matchedFormNumbers);
+    // Expand relationships:
+    // 1. If form numbers known, lookup user_account_information for client_code
+    if (formNumbers.size > 0) {
       const { data: accounts } = await supabaseClient
         .from("user_account_information")
-        .select("*")
-        .in("form_number", formArr);
+        .select("form_number, client_code")
+        .in("form_number", Array.from(formNumbers));
 
-      if (accounts) {
-        accounts.forEach((acc: any) => {
-          if (acc.client_code) matchedClientCodes.add(String(acc.client_code));
-        });
-      }
+      (accounts || []).forEach((acc: any) => {
+        if (acc.client_code) clientCodes.add(String(acc.client_code));
+      });
     }
 
-    // 2. If client codes found, fetch user_account_information to expand form numbers
-    if (matchedClientCodes.size > 0) {
-      const clientArr = Array.from(matchedClientCodes);
+    // 2. If client codes known, lookup user_account_information for form_number
+    if (clientCodes.size > 0) {
       const { data: accounts } = await supabaseClient
         .from("user_account_information")
-        .select("*")
-        .in("client_code", clientArr);
+        .select("form_number, client_code")
+        .in("client_code", Array.from(clientCodes));
 
-      if (accounts) {
-        accounts.forEach((acc: any) => {
-          if (acc.form_number) matchedFormNumbers.add(Number(acc.form_number));
-        });
+      (accounts || []).forEach((acc: any) => {
+        if (acc.form_number) formNumbers.add(Number(acc.form_number));
+      });
+    }
+
+    // Fetch full data across all 5 tables for the resolved keys
+    const cCodesArr = Array.from(clientCodes);
+    const fNumsArr = Array.from(formNumbers);
+
+    let [uDetails, uAccounts, uAddresses, uPersonal, cDetails] = await Promise.all([
+      cCodesArr.length > 0
+        ? supabaseClient.from("user_details").select("*").in("client_code", cCodesArr).then((r) => r.data || [])
+        : Promise.resolve([]),
+      fNumsArr.length > 0
+        ? supabaseClient.from("user_account_information").select("*").in("form_number", fNumsArr).then((r) => r.data || [])
+        : Promise.resolve([]),
+      fNumsArr.length > 0
+        ? supabaseClient.from("user_address_details").select("*").in("form_number", fNumsArr).then((r) => r.data || [])
+        : Promise.resolve([]),
+      fNumsArr.length > 0
+        ? supabaseClient.from("user_personal_details").select("*").in("form_number", fNumsArr).then((r) => r.data || [])
+        : Promise.resolve([]),
+      cCodesArr.length > 0 || fNumsArr.length > 0
+        ? supabaseClient.from("client_details").select("*").in("form_number", fNumsArr).then((r) => r.data || [])
+        : Promise.resolve([]),
+    ]);
+
+    // Build lookup indexes
+    const uDetailsByCode = new Map(uDetails.map((u: any) => [String(u.client_code).toUpperCase(), u]));
+    const uAccountsByForm = new Map(uAccounts.map((a: any) => [Number(a.form_number), a]));
+    const uAccountsByCode = new Map(uAccounts.map((a: any) => [String(a.client_code).toUpperCase(), a]));
+    const uAddressesByForm = new Map(uAddresses.map((a: any) => [Number(a.form_number), a]));
+    const uPersonalByForm = new Map(uPersonal.map((p: any) => [Number(p.form_number), p]));
+    const cDetailsByForm = new Map(cDetails.map((c: any) => [Number(c.form_number), c]));
+    const cDetailsByCode = new Map(cDetails.map((c: any) => [String(c.client_code).toUpperCase(), c]));
+
+    // Construct unified response for each target identifier
+    const results = targets.map((target) => {
+      let resolvedCode: string | null = null;
+      let resolvedForm: number | null = null;
+
+      if (searchType === "mobile") {
+        const addr = uAddresses.find((a: any) => String(a.user_mobile_number).trim() === target);
+        if (addr) {
+          resolvedForm = Number(addr.form_number);
+          const acc = uAccountsByForm.get(resolvedForm);
+          if (acc) resolvedCode = acc.client_code;
+        }
+      } else if (searchType === "client_code") {
+        const cUp = target.toUpperCase();
+        if (uDetailsByCode.has(cUp) || uAccountsByCode.has(cUp) || cDetailsByCode.has(cUp)) {
+          resolvedCode = cUp;
+          const acc = uAccountsByCode.get(cUp);
+          if (acc) resolvedForm = Number(acc.form_number);
+        }
+      } else if (searchType === "form_number") {
+        const num = Number(target);
+        if (!isNaN(num) && (uAccountsByForm.has(num) || uAddressesByForm.has(num) || uPersonalByForm.has(num))) {
+          resolvedForm = num;
+          const acc = uAccountsByForm.get(num);
+          if (acc) resolvedCode = acc.client_code;
+        }
       }
-    }
 
-    // Retrieve full data across all 5 tables
-    const clientCodesArr = Array.from(matchedClientCodes);
-    const formNumbersArr = Array.from(matchedFormNumbers);
+      if (!resolvedCode && !resolvedForm) {
+        return {
+          identifier: target,
+          status: "NO MATCH",
+          values: {},
+        };
+      }
 
-    let userDetailsList: any[] = [];
-    let accountInfoList: any[] = [];
-    let addressList: any[] = [];
-    let personalList: any[] = [];
-    let clientDetailsList: any[] = [];
+      const ud = resolvedCode ? uDetailsByCode.get(resolvedCode.toUpperCase()) : null;
+      const ua = resolvedForm ? uAccountsByForm.get(resolvedForm) : (resolvedCode ? uAccountsByCode.get(resolvedCode.toUpperCase()) : null);
+      const uadd = resolvedForm ? uAddressesByForm.get(resolvedForm) : null;
+      const up = resolvedForm ? uPersonalByForm.get(resolvedForm) : null;
+      const cd = resolvedForm ? cDetailsByForm.get(resolvedForm) : (resolvedCode ? cDetailsByCode.get(resolvedCode.toUpperCase()) : null);
 
-    if (clientCodesArr.length > 0) {
-      const { data } = await supabaseClient.from("user_details").select("*").in("client_code", clientCodesArr);
-      userDetailsList = data || [];
-    }
-    if (formNumbersArr.length > 0 || clientCodesArr.length > 0) {
-      let query = supabaseClient.from("user_account_information").select("*");
-      if (formNumbersArr.length > 0) query = query.in("form_number", formNumbersArr);
-      else if (clientCodesArr.length > 0) query = query.in("client_code", clientCodesArr);
-      const { data } = await query;
-      accountInfoList = data || [];
-    }
-    if (formNumbersArr.length > 0) {
-      const { data: addrs } = await supabaseClient.from("user_address_details").select("*").in("form_number", formNumbersArr);
-      addressList = addrs || [];
-      const { data: pers } = await supabaseClient.from("user_personal_details").select("*").in("form_number", formNumbersArr);
-      personalList = pers || [];
-    }
-    if (clientCodesArr.length > 0 || formNumbersArr.length > 0) {
-      let query = supabaseClient.from("client_details").select("*");
-      if (clientCodesArr.length > 0) query = query.in("client_code", clientCodesArr);
-      else if (formNumbersArr.length > 0) query = query.in("form_number", formNumbersArr);
-      const { data } = await query;
-      clientDetailsList = data || [];
-    }
+      const mergedRecord = {
+        ...(ud || {}),
+        ...(ua || {}),
+        ...(uadd || {}),
+        ...(up || {}),
+        ...(cd || {}),
+      };
 
-    const totalRecordsFound =
-      userDetailsList.length +
-      accountInfoList.length +
-      addressList.length +
-      personalList.length +
-      clientDetailsList.length;
-
-    let tablesCount = 0;
-    if (userDetailsList.length > 0) tablesCount++;
-    if (accountInfoList.length > 0) tablesCount++;
-    if (addressList.length > 0) tablesCount++;
-    if (personalList.length > 0) tablesCount++;
-    if (clientDetailsList.length > 0) tablesCount++;
-
-    const status = totalRecordsFound > 0 ? "MATCHED" : "NO MATCH";
-
-    const response = {
-      searchCriteria: cleanVal,
-      searchType,
-      executionStatus: "SUCCESS",
-      validationStatus: totalRecordsFound > 0 ? "PASS" : "N/A",
-      tablesReturned: tablesCount,
-      relationshipPaths: relationshipPath,
-      recordCounts: {
-        user_details: userDetailsList.length,
-        user_account_information: accountInfoList.length,
-        user_address_details: addressList.length,
-        user_personal_details: personalList.length,
-        client_details: clientDetailsList.length,
-        total: totalRecordsFound,
-      },
-      data: {
-        user_details: userDetailsList,
-        user_account_information: accountInfoList,
-        user_address_details: addressList,
-        user_personal_details: personalList,
-        client_details: clientDetailsList,
-      },
-    };
-
-    return new Response(JSON.stringify(response), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-      status: 200,
+      return {
+        identifier: target,
+        status: "MATCHED",
+        values: mergedRecord,
+      };
     });
-  } catch (err: any) {
+
     return new Response(
       JSON.stringify({
-        error: err.message || "Retrieval execution error",
-        executionStatus: "ERROR",
-        validationStatus: "FAIL",
+        searchMode,
+        searchType,
+        totalRequested: targets.length,
+        results,
       }),
+      { headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 200 }
+    );
+  } catch (err: any) {
+    return new Response(
+      JSON.stringify({ error: err.message || "Edge function retrieval failure" }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" }, status: 500 }
     );
   }
